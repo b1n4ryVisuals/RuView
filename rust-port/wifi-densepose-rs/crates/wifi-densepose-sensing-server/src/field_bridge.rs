@@ -20,10 +20,17 @@ const ENERGY_THRESH_2: f64 = 12.0;
 const ENERGY_THRESH_3: f64 = 25.0;
 
 /// Create a FieldModelConfig for single-link mode (one ESP32 node = one link).
-/// This avoids the DimensionMismatch error when feeding single-frame observations.
+///
+/// `min_calibration_frames` is lowered to 200 (~10 s at 20 Hz) so that a
+/// short empty-room capture is enough to finalize the baseline.  The default
+/// of 12,000 frames (10 min) is impractical for interactive calibration.
+/// `n_subcarriers` is intentionally left at 0 here — the actual value is
+/// patched in `maybe_feed_calibration` once the first real frame arrives, so
+/// the model always matches the hardware's subcarrier count.
 pub fn single_link_config() -> FieldModelConfig {
     FieldModelConfig {
         n_links: 1,
+        min_calibration_frames: 200,
         ..FieldModelConfig::default()
     }
 }
@@ -83,18 +90,53 @@ pub fn occupancy_or_fallback(
 
 /// Feed the latest frame to the FieldModel during calibration collection.
 ///
-/// Only acts when the model status is `Collecting`. Wraps the latest frame
-/// as a single-link observation (n_links=1) and feeds it.
-pub fn maybe_feed_calibration(field: &mut FieldModel, frame_history: &VecDeque<Vec<f64>>) {
-    if field.status() != CalibrationStatus::Collecting {
-        return;
+/// Takes `&mut Option<FieldModel>` so it can lazily recreate the model on the
+/// very first frame with the actual subcarrier count reported by the hardware.
+/// The default config uses `n_subcarriers: 56`, but ESP32-S3 typically sends
+/// 114 subcarriers.  Without this fix every `feed_calibration` call silently
+/// returns `DimensionMismatch` and the frame count stays at 0.
+pub fn maybe_feed_calibration(field_opt: &mut Option<FieldModel>, frame_history: &VecDeque<Vec<f64>>) {
+    let status = match field_opt.as_ref() {
+        Some(f) => f.status(),
+        None => return,
+    };
+    match status {
+        CalibrationStatus::Uncalibrated | CalibrationStatus::Collecting => {}
+        _ => return,
     }
-    if let Some(latest) = frame_history.back() {
-        // Single-link observation: [1][n_subcarriers]
-        let observations = vec![latest.clone()];
-        if let Err(e) = field.feed_calibration(&observations) {
-            tracing::debug!("FieldModel calibration feed: {e}");
+    let latest = match frame_history.back() {
+        Some(f) if !f.is_empty() => f,
+        _ => return,
+    };
+
+    // On the very first frame (Uncalibrated, 0 frames collected), check whether
+    // the configured n_subcarriers matches the live frame.  If not, recreate the
+    // model with the correct size so that feed_calibration never returns
+    // DimensionMismatch.
+    if status == CalibrationStatus::Uncalibrated {
+        let configured = field_opt.as_ref().unwrap().n_subcarriers();
+        if configured != latest.len() {
+            let new_cfg = FieldModelConfig {
+                n_links: 1,
+                n_subcarriers: latest.len(),
+                min_calibration_frames: 200,
+                ..FieldModelConfig::default()
+            };
+            match FieldModel::new(new_cfg) {
+                Ok(new_fm) => { *field_opt = Some(new_fm); }
+                Err(e) => {
+                    tracing::warn!("FieldModel resize {configured}→{} failed: {e}", latest.len());
+                    return;
+                }
+            }
         }
+    }
+
+    let field = field_opt.as_mut().unwrap();
+    // Single-link observation: [1][n_subcarriers]
+    let observations = vec![latest.clone()];
+    if let Err(e) = field.feed_calibration(&observations) {
+        tracing::debug!("FieldModel calibration feed: {e}");
     }
 }
 

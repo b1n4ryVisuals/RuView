@@ -431,6 +431,11 @@ impl FieldModel {
             .map_or(0, |ls| ls.observation_count())
     }
 
+    /// Configured subcarrier count for this model instance.
+    pub fn n_subcarriers(&self) -> usize {
+        self.config.n_subcarriers
+    }
+
     /// Feed a calibration frame (one CSI observation per link during empty room).
     ///
     /// `observations` is `[n_links][n_subcarriers]` amplitude data.

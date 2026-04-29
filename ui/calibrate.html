@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>RuView Calibration</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0a0a0f;
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 8px; color: #fff; }
+  .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 32px; text-align: center; }
+  .card {
+    background: #13131a;
+    border: 1px solid #2a2a3a;
+    border-radius: 16px;
+    padding: 28px 24px;
+    width: 100%;
+    max-width: 360px;
+  }
+  .status-box {
+    background: #0d0d14;
+    border: 1px solid #2a2a3a;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 24px;
+    min-height: 72px;
+  }
+  .status-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: #555; margin-bottom: 6px; }
+  .status-value { font-size: 1.05rem; font-weight: 500; }
+  .status-idle     { color: #888; }
+  .status-active   { color: #4af; }
+  .status-done     { color: #4c4; }
+  .status-error    { color: #f66; }
+  .frames { font-size: 0.8rem; color: #666; margin-top: 4px; }
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 16px;
+    border-radius: 12px;
+    border: none;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+    margin-bottom: 12px;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .btn-start { background: #1a6fd4; color: #fff; }
+  .btn-stop  { background: #2a9a4a; color: #fff; }
+  .instruction {
+    font-size: 0.82rem;
+    color: #666;
+    text-align: center;
+    margin-top: 8px;
+    line-height: 1.5;
+    min-height: 40px;
+  }
+  .instruction.active { color: #4af; }
+</style>
+</head>
+<body>
+<h1>Room Calibration</h1>
+<p class="subtitle">Sets the empty-room baseline so neighbours<br>and walls are filtered out</p>
+
+<div class="card">
+  <div class="status-box">
+    <div class="status-label">Status</div>
+    <div class="status-value status-idle" id="statusText">Not calibrated</div>
+    <div class="frames" id="framesText"></div>
+  </div>
+
+  <button class="btn btn-start" id="btnStart" onclick="startCalibration()">Start — leave room now</button>
+  <button class="btn btn-stop"  id="btnStop"  onclick="stopCalibration()" disabled>Stop — I'm back in the room</button>
+
+  <div class="instruction" id="instruction">
+    Press Start, then immediately leave the room.<br>Come back and press Stop when done.
+  </div>
+</div>
+
+<script>
+const base = window.location.origin;
+let pollTimer = null;
+
+async function post(path) {
+  const r = await fetch(base + path, { method: 'POST' });
+  return r.json();
+}
+
+async function get(path) {
+  const r = await fetch(base + path);
+  return r.json();
+}
+
+async function startCalibration() {
+  document.getElementById('btnStart').disabled = true;
+  document.getElementById('instruction').textContent = 'Starting…';
+  try {
+    const d = await post('/api/v1/calibration/start');
+    if (d.success === false) {
+      setStatus('error', d.error || 'Failed to start');
+      document.getElementById('btnStart').disabled = false;
+      return;
+    }
+    setStatus('active', 'Capturing empty room…');
+    document.getElementById('btnStop').disabled = false;
+    document.getElementById('instruction').className = 'instruction active';
+    document.getElementById('instruction').textContent = 'Room is being recorded. Leave now if you haven\'t already.';
+    startPolling();
+  } catch(e) {
+    setStatus('error', 'Server unreachable');
+    document.getElementById('btnStart').disabled = false;
+  }
+}
+
+async function stopCalibration() {
+  stopPolling();
+  document.getElementById('btnStop').disabled = true;
+  document.getElementById('instruction').textContent = 'Finalising…';
+  try {
+    const d = await post('/api/v1/calibration/stop');
+    if (d.success === false) {
+      setStatus('error', d.error || 'Failed to stop');
+      document.getElementById('btnStop').disabled = false;
+      return;
+    }
+    const frames = d.frame_count ? ` (${d.frame_count} frames)` : '';
+    setStatus('done', 'Calibrated ✓' + frames);
+    document.getElementById('instruction').className = 'instruction';
+    document.getElementById('instruction').textContent = 'Baseline locked in. Person detection is now neighbour-filtered.';
+    document.getElementById('btnStart').disabled = false;
+  } catch(e) {
+    setStatus('error', 'Server unreachable');
+    document.getElementById('btnStop').disabled = false;
+  }
+}
+
+function startPolling() {
+  pollTimer = setInterval(async () => {
+    try {
+      const d = await get('/api/v1/calibration/status');
+      if (d.frame_count !== undefined) {
+        document.getElementById('framesText').textContent = d.frame_count + ' frames captured';
+      }
+    } catch(e) {}
+  }, 1000);
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+function setStatus(type, text) {
+  const el = document.getElementById('statusText');
+  el.className = 'status-value status-' + type;
+  el.textContent = text;
+}
+
+// Load current status on page open
+get('/api/v1/calibration/status').then(d => {
+  if (!d || !d.status) return;
+  const s = d.status.toLowerCase();
+  if (s.includes('fresh')) {
+    const frames = d.frame_count ? ` (${d.frame_count} frames)` : '';
+    setStatus('done', 'Calibrated ✓' + frames);
+    document.getElementById('btnStart').disabled = false;
+    document.getElementById('btnStop').disabled = true;
+    document.getElementById('instruction').textContent = 'Calibration active. Press Start to recalibrate.';
+  } else if (s.includes('collecting') || s.includes('progress')) {
+    setStatus('active', 'Capture in progress…');
+    document.getElementById('btnStart').disabled = true;
+    document.getElementById('btnStop').disabled = false;
+    startPolling();
+  }
+}).catch(() => {});
+</script>
+</body>
+</html>

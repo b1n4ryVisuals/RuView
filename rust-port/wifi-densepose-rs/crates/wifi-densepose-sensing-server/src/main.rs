@@ -3250,23 +3250,15 @@ async fn adaptive_unload(State(state): State<SharedState>) -> Json<serde_json::V
 
 async fn calibration_start(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let mut s = state.write().await;
-    // Guard: don't discard an in-progress or fresh calibration
+    // Only guard against an active in-progress capture; Fresh/Stale/Expired all
+    // allow restart so the user can recalibrate without extra steps.
     if let Some(ref fm) = s.field_model {
-        match fm.status() {
-            CalibrationStatus::Collecting => {
-                return Json(serde_json::json!({
-                    "success": false,
-                    "error": "Calibration already in progress. Call /calibration/stop first.",
-                    "frame_count": fm.calibration_frame_count(),
-                }));
-            }
-            CalibrationStatus::Fresh => {
-                return Json(serde_json::json!({
-                    "success": false,
-                    "error": "A fresh calibration already exists. Call /calibration/stop or wait for expiry.",
-                }));
-            }
-            _ => {} // Stale/Expired/Uncalibrated — ok to recalibrate
+        if fm.status() == CalibrationStatus::Collecting {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "Calibration already in progress. Press Stop first.",
+                "frame_count": fm.calibration_frame_count(),
+            }));
         }
     }
     match FieldModel::new(field_bridge::single_link_config()) {
@@ -3616,9 +3608,7 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
 
                     // Feed field model calibration if active (use per-node history for ESP32).
                     if let Some(frame_history) = s.node_states.get(&node_id).map(|ns| ns.frame_history.clone()) {
-                        if let Some(ref mut fm) = s.field_model {
-                            field_bridge::maybe_feed_calibration(fm, &frame_history);
-                        }
+                        field_bridge::maybe_feed_calibration(&mut s.field_model, &frame_history);
                     }
 
                     // Build nodes array with all active nodes.
@@ -3866,9 +3856,7 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
 
                     // Feed field model calibration if active (use per-node history for ESP32).
                     if let Some(frame_history) = s.node_states.get(&node_id).map(|ns| ns.frame_history.clone()) {
-                        if let Some(ref mut fm) = s.field_model {
-                            field_bridge::maybe_feed_calibration(fm, &frame_history);
-                        }
+                        field_bridge::maybe_feed_calibration(&mut s.field_model, &frame_history);
                     }
 
                     // Build nodes array with all active nodes.
@@ -3967,6 +3955,12 @@ async fn simulated_data_task(state: SharedState, tick_ms: u64) {
         s.frame_history.push_back(frame.amplitudes.clone());
         if s.frame_history.len() > FRAME_HISTORY_CAPACITY {
             s.frame_history.pop_front();
+        }
+
+        // Feed calibration model if active.
+        if s.field_model.is_some() {
+            let history_snapshot = s.frame_history.clone();
+            field_bridge::maybe_feed_calibration(&mut s.field_model, &history_snapshot);
         }
 
         let sample_rate_hz = 1000.0 / tick_ms as f64;
